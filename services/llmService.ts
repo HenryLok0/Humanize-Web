@@ -433,36 +433,69 @@ export const generateArticle = async (
     // 1 word ~= 1.5 tokens (conservative for CJK/mixed). 
     const expectedOutputTokens = Math.ceil(wordCount * 1.6); 
 
-    const reply = await engine.chat.completions.create({
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt }
-      ],
-      temperature: 0.75, 
-      presence_penalty: 0.6, 
-      frequency_penalty: 0.5, 
-      max_tokens: Math.max(expectedOutputTokens + 500, 2048), // Ensure plenty of space
-      stream: true,
-    });
+    let messages = [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt }
+    ];
 
-    let content = "";
-    let generatedTokens = 0;
+    let fullContent = "";
+    let totalGeneratedTokens = 0;
+    
+    // Loop to ensure length
+    let iteration = 0;
+    const maxIterations = 5;
 
-    for await (const chunk of reply) {
-        const delta = chunk.choices[0]?.delta?.content || "";
-        content += delta;
-        if (delta) {
-            generatedTokens++;
-            if (onProgress) {
-                let percent = Math.min(Math.round((generatedTokens / expectedOutputTokens) * 100), 99);
-                onProgress(percent);
+    while (iteration < maxIterations) {
+        const reply = await engine.chat.completions.create({
+          messages: messages as any,
+          temperature: 0.75, 
+          presence_penalty: 0.6, 
+          frequency_penalty: 0.5, 
+          max_tokens: 2048, // Generate a chunk
+          stream: true,
+        });
+
+        let chunkContent = "";
+
+        for await (const chunk of reply) {
+            const delta = chunk.choices[0]?.delta?.content || "";
+            chunkContent += delta;
+            fullContent += delta;
+            
+            if (delta) {
+                totalGeneratedTokens++;
+                if (onProgress) {
+                    let percent = Math.min(Math.round((totalGeneratedTokens / expectedOutputTokens) * 100), 99);
+                    onProgress(percent);
+                }
             }
         }
+
+        // Check length
+        const cjkCount = (fullContent.match(/[\u4e00-\u9fa5]/g) || []).length;
+        const nonCjkText = fullContent.replace(/[\u4e00-\u9fa5]/g, ' ');
+        const spaceSeparatedCount = nonCjkText.trim() === '' ? 0 : nonCjkText.trim().split(/\s+/).length;
+        const currentWordCount = cjkCount + spaceSeparatedCount;
+
+        if (currentWordCount >= wordCount) {
+            break;
+        }
+
+        // Prepare for next iteration
+        messages.push({ role: "assistant", content: chunkContent });
+        
+        let continuePrompt = "Continue writing. Do NOT repeat the previous content. Introduce new ideas, examples, or perspectives to extend the article length.";
+        if (isChinese) {
+            continuePrompt = "請繼續寫作。不要重複之前的內容。引入新的觀點、例子或角度來延長文章篇幅。";
+        }
+        messages.push({ role: "user", content: continuePrompt });
+        
+        iteration++;
     }
     
     if (onProgress) onProgress(100);
     
-    return content.trim();
+    return fullContent.trim();
   } catch (err) {
     console.error("Article Generation Error:", err);
     throw new Error("Failed to generate article.");
